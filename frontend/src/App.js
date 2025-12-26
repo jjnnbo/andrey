@@ -31,6 +31,9 @@ function App() {
     };
   }, []);
 
+  // Target URL (can be configured)
+  const TARGET_URL = "https://pocketoption.com";
+
   // Create session
   const createSession = useCallback(async () => {
     setIsConnecting(true);
@@ -38,7 +41,8 @@ function App() {
     
     try {
       const { width, height } = getViewportSize();
-      const response = await fetch(`${API}/session/create?viewport_width=${width}&viewport_height=${height}`, {
+      const url = `${API}/session/create?viewport_width=${width}&viewport_height=${height}&start_url=${encodeURIComponent(TARGET_URL)}`;
+      const response = await fetch(url, {
         method: 'POST'
       });
       
