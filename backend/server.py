@@ -270,6 +270,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             event = json.loads(data)
             session.last_activity = datetime.now(timezone.utc)
             
+            logger.info(f"Received event: {event.get('type')} - {event}")
             await handle_browser_event(session, event)
     
     except WebSocketDisconnect:
