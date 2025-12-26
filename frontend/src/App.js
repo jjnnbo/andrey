@@ -460,19 +460,21 @@ function App() {
           tabIndex={0}
         />
         
-        {/* Hidden input for mobile keyboard */}
+        {/* Hidden input for mobile keyboard - positioned to capture touch focus */}
         <input
           ref={inputRef}
           type="text"
           className="hidden-input"
           onInput={handleInput}
-          onKeyDown={handleKeyDown}
-          onKeyUp={handleKeyUp}
+          onKeyDown={handleMobileKeyDown}
           autoComplete="off"
           autoCorrect="off"
-          autoCapitalize="off"
+          autoCapitalize="none"
           spellCheck="false"
+          enterKeyHint="send"
+          inputMode="text"
           data-testid="mobile-input"
+          aria-label="Mobile keyboard input"
         />
       </main>
     </div>
