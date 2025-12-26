@@ -284,6 +284,38 @@ function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, [getViewportSize, sendEvent]);
 
+  // Global keyboard listener when connected
+  useEffect(() => {
+    if (!isConnected) return;
+    
+    const handleGlobalKeyDown = (e) => {
+      // Only handle if not in an input field
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      
+      e.preventDefault();
+      if (e.key.length === 1) {
+        sendEvent({ type: 'keypress', key: e.key });
+      } else {
+        sendEvent({ type: 'keydown', key: e.key });
+      }
+    };
+    
+    const handleGlobalKeyUp = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key.length > 1) {
+        sendEvent({ type: 'keyup', key: e.key });
+      }
+    };
+    
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    window.addEventListener('keyup', handleGlobalKeyUp);
+    
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener('keyup', handleGlobalKeyUp);
+    };
+  }, [isConnected, sendEvent]);
+
   // Initialize session on mount
   useEffect(() => {
     let mounted = true;
