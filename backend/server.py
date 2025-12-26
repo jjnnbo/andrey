@@ -145,13 +145,17 @@ async def create_session(viewport_width: int = 1280, viewport_height: int = 720)
             viewport={"width": viewport_width, "height": viewport_height},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="pt-BR",
-            timezone_id="America/Sao_Paulo"
+            timezone_id="America/Sao_Paulo",
+            ignore_https_errors=True
         )
         
         page = await context.new_page()
         
-        # Navigate to Pocket Option
-        await page.goto("https://pocketoption.com", wait_until="domcontentloaded", timeout=30000)
+        # Navigate to Pocket Option with longer timeout
+        try:
+            await page.goto("https://pocketoption.com", wait_until="commit", timeout=60000)
+        except Exception as nav_error:
+            logger.warning(f"Navigation timeout, continuing anyway: {nav_error}")
         
         session = BrowserSession(session_id, page, context)
         session.viewport_width = viewport_width
