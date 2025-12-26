@@ -359,6 +359,17 @@ function App() {
           </div>
         )}
         
+        {/* Site Loading State - Connected but no frames yet */}
+        {isConnected && !hasFrames && !isConnecting && (
+          <div className="loading-overlay site-loading" data-testid="site-loading-overlay">
+            <div className="loading-content">
+              <Loader2 className="loading-spinner" />
+              <p>Carregando site...</p>
+              <span className="loading-hint">Aguarde enquanto o site é carregado</span>
+            </div>
+          </div>
+        )}
+        
         {/* Error State */}
         {error && !isConnecting && (
           <div className="error-overlay" data-testid="error-overlay">
