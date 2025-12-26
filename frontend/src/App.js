@@ -271,12 +271,24 @@ function App() {
     }
   }, [sendEvent]);
 
-  // Handle mobile input
+  // Handle mobile input - captures each character typed on mobile keyboard
   const handleInput = useCallback((e) => {
     const text = e.target.value;
     if (text) {
-      sendEvent({ type: 'input', text });
+      // Send each character
+      for (const char of text) {
+        sendEvent({ type: 'keypress', key: char });
+      }
       e.target.value = '';
+    }
+  }, [sendEvent]);
+
+  // Handle mobile keyboard special keys
+  const handleMobileKeyDown = useCallback((e) => {
+    // Handle special keys like Backspace, Enter on mobile
+    if (e.key === 'Backspace' || e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      sendEvent({ type: 'keydown', key: e.key });
     }
   }, [sendEvent]);
 
