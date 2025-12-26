@@ -217,15 +217,18 @@ function App() {
   }, [getCoordinates, sendEvent]);
 
   // Touch event handlers
+  const lastTouchRef = useRef({ x: 0, y: 0 });
+  
   const handleTouchStart = useCallback((e) => {
     e.preventDefault();
     const touch = e.touches[0];
     if (touch) {
       const coords = getCoordinates(e);
+      lastTouchRef.current = coords;
       sendEvent({ type: 'mousedown', ...coords, button: 'left' });
     }
     
-    // Focus hidden input for mobile keyboard
+    // Focus hidden input for mobile keyboard - this opens the keyboard!
     if (inputRef.current) {
       inputRef.current.focus();
     }
@@ -234,16 +237,20 @@ function App() {
   const handleTouchMove = useCallback((e) => {
     e.preventDefault();
     const coords = getCoordinates(e);
+    lastTouchRef.current = coords;
     sendEvent({ type: 'mousemove', ...coords });
   }, [getCoordinates, sendEvent]);
 
   const handleTouchEnd = useCallback((e) => {
     e.preventDefault();
-    // Use last known position
-    const canvas = canvasRef.current;
-    if (canvas) {
-      sendEvent({ type: 'mouseup', x: 0, y: 0, button: 'left' });
-      sendEvent({ type: 'click', x: 0, y: 0, button: 'left' });
+    // Use last known touch position
+    const coords = lastTouchRef.current;
+    sendEvent({ type: 'mouseup', ...coords, button: 'left' });
+    sendEvent({ type: 'click', ...coords, button: 'left' });
+    
+    // Keep focus on input for keyboard
+    if (inputRef.current) {
+      inputRef.current.focus();
     }
   }, [sendEvent]);
 
