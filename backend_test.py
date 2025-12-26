@@ -76,8 +76,9 @@ class MagoTraderAPITester:
     def test_create_session(self):
         """Test POST /api/session/create"""
         try:
-            # Test with default viewport
-            response = requests.post(f"{self.api_url}/session/create", timeout=30)
+            # Test with Google instead of pocketoption.com to avoid IP blocking
+            params = {"start_url": "https://google.com"}
+            response = requests.post(f"{self.api_url}/session/create", params=params, timeout=30)
             success = response.status_code == 200
             
             if success:
