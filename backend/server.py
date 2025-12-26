@@ -151,21 +151,16 @@ async def create_session(viewport_width: int = 1280, viewport_height: int = 720)
         
         page = await context.new_page()
         
-        # Navigate to Pocket Option with longer timeout
-        try:
-            await page.goto("https://pocketoption.com", wait_until="commit", timeout=60000)
-            logger.info(f"Successfully navigated to pocketoption.com")
-        except Exception as nav_error:
-            logger.warning(f"Navigation timeout, continuing anyway: {nav_error}")
-            # Continue with session creation even if navigation fails
-        
-        # Create session regardless of navigation success
+        # Create session immediately without waiting for navigation
         session = BrowserSession(session_id, page, context)
         session.viewport_width = viewport_width
         session.viewport_height = viewport_height
         sessions[session_id] = session
         
         logger.info(f"Created session {session_id} with viewport {viewport_width}x{viewport_height}")
+        
+        # Start navigation in background (don't wait)
+        asyncio.create_task(navigate_session(session_id, "https://pocketoption.com"))
         
         return {"session_id": session_id, "status": "created"}
     
@@ -178,6 +173,18 @@ async def create_session(viewport_width: int = 1280, viewport_height: int = 720)
         except:
             pass
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+async def navigate_session(session_id: str, url: str):
+    """Navigate session to URL in background"""
+    if session_id not in sessions:
+        return
+    
+    session = sessions[session_id]
+    try:
+        await session.page.goto(url, wait_until="commit", timeout=60000)
+        logger.info(f"Session {session_id} navigated to {url}")
+    except Exception as e:
+        logger.warning(f"Navigation error for session {session_id}: {e}")
 
 @api_router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
