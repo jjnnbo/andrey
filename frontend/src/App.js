@@ -33,7 +33,7 @@ function App() {
   }, []);
 
   // Target URL (can be configured)
-  const TARGET_URL = "https://www.google.com";
+  const TARGET_URL = "https://pocketoption.com/en/login";
 
   // Create session
   const createSession = useCallback(async () => {
