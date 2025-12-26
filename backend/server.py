@@ -1,15 +1,19 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+import asyncio
+import base64
+import json
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
-
+from typing import Dict, Optional
+from contextlib import asynccontextmanager
+from playwright.async_api import async_playwright, Browser, Page, Playwright
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -19,52 +23,371 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Global Playwright instance
+playwright_instance: Optional[Playwright] = None
+browser_instance: Optional[Browser] = None
+
+# Session management
+class BrowserSession:
+    def __init__(self, session_id: str, page: Page, context):
+        self.session_id = session_id
+        self.page = page
+        self.context = context
+        self.websocket: Optional[WebSocket] = None
+        self.last_activity = datetime.now(timezone.utc)
+        self.streaming = False
+        self.stream_task: Optional[asyncio.Task] = None
+        self.viewport_width = 1280
+        self.viewport_height = 720
+
+sessions: Dict[str, BrowserSession] = {}
+
+# Cleanup inactive sessions
+async def cleanup_sessions():
+    while True:
+        await asyncio.sleep(60)
+        now = datetime.now(timezone.utc)
+        to_remove = []
+        for session_id, session in sessions.items():
+            inactive_time = (now - session.last_activity).total_seconds()
+            if inactive_time > 300:  # 5 minutes timeout
+                to_remove.append(session_id)
+        
+        for session_id in to_remove:
+            await close_session(session_id)
+            logger.info(f"Cleaned up inactive session: {session_id}")
+
+async def close_session(session_id: str):
+    if session_id in sessions:
+        session = sessions[session_id]
+        session.streaming = False
+        if session.stream_task:
+            session.stream_task.cancel()
+        try:
+            await session.page.close()
+            await session.context.close()
+        except Exception as e:
+            logger.error(f"Error closing session {session_id}: {e}")
+        del sessions[session_id]
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global playwright_instance, browser_instance
+    
+    # Startup
+    logger.info("Starting Playwright...")
+    playwright_instance = await async_playwright().start()
+    browser_instance = await playwright_instance.chromium.launch(
+        headless=True,
+        args=[
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process'
+        ]
+    )
+    logger.info("Playwright browser started")
+    
+    # Start cleanup task
+    cleanup_task = asyncio.create_task(cleanup_sessions())
+    
+    yield
+    
+    # Shutdown
+    cleanup_task.cancel()
+    
+    for session_id in list(sessions.keys()):
+        await close_session(session_id)
+    
+    if browser_instance:
+        await browser_instance.close()
+    if playwright_instance:
+        await playwright_instance.stop()
+    client.close()
+    logger.info("Playwright shutdown complete")
+
+# Create the main app with lifespan
+app = FastAPI(lifespan=lifespan)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Mago Trader API", "status": "online"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+@api_router.get("/health")
+async def health():
+    return {"status": "healthy", "sessions": len(sessions)}
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+@api_router.post("/session/create")
+async def create_session(viewport_width: int = 1280, viewport_height: int = 720):
+    """Create a new browser session"""
+    global browser_instance
     
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    if not browser_instance:
+        return JSONResponse(status_code=500, content={"error": "Browser not available"})
     
-    return status_checks
+    session_id = str(uuid.uuid4())
+    
+    try:
+        # Create browser context with viewport
+        context = await browser_instance.new_context(
+            viewport={"width": viewport_width, "height": viewport_height},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="pt-BR",
+            timezone_id="America/Sao_Paulo"
+        )
+        
+        page = await context.new_page()
+        
+        # Navigate to Pocket Option
+        await page.goto("https://pocketoption.com", wait_until="domcontentloaded", timeout=30000)
+        
+        session = BrowserSession(session_id, page, context)
+        session.viewport_width = viewport_width
+        session.viewport_height = viewport_height
+        sessions[session_id] = session
+        
+        logger.info(f"Created session {session_id} with viewport {viewport_width}x{viewport_height}")
+        
+        return {"session_id": session_id, "status": "created"}
+    
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@api_router.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a browser session"""
+    if session_id in sessions:
+        await close_session(session_id)
+        return {"status": "deleted"}
+    return JSONResponse(status_code=404, content={"error": "Session not found"})
+
+@api_router.get("/sessions")
+async def list_sessions():
+    """List active sessions"""
+    return {
+        "count": len(sessions),
+        "sessions": [
+            {
+                "id": s.session_id,
+                "last_activity": s.last_activity.isoformat(),
+                "streaming": s.streaming
+            }
+            for s in sessions.values()
+        ]
+    }
+
+# WebSocket for browser streaming and control
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    
+    if session_id not in sessions:
+        await websocket.send_json({"type": "error", "message": "Session not found"})
+        await websocket.close()
+        return
+    
+    session = sessions[session_id]
+    session.websocket = websocket
+    session.streaming = True
+    
+    logger.info(f"WebSocket connected for session {session_id}")
+    
+    # Start screenshot streaming task
+    async def stream_screenshots():
+        while session.streaming:
+            try:
+                if session.page and not session.page.is_closed():
+                    screenshot = await session.page.screenshot(
+                        type="jpeg",
+                        quality=60,
+                        full_page=False
+                    )
+                    screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
+                    
+                    await websocket.send_json({
+                        "type": "frame",
+                        "data": screenshot_base64
+                    })
+                
+                # ~15 FPS for smooth experience
+                await asyncio.sleep(0.066)
+            
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"Screenshot error: {e}")
+                await asyncio.sleep(0.1)
+    
+    session.stream_task = asyncio.create_task(stream_screenshots())
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            event = json.loads(data)
+            session.last_activity = datetime.now(timezone.utc)
+            
+            await handle_browser_event(session, event)
+    
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for session {session_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        session.streaming = False
+        if session.stream_task:
+            session.stream_task.cancel()
+        session.websocket = None
+
+async def handle_browser_event(session: BrowserSession, event: dict):
+    """Handle browser events from the frontend"""
+    try:
+        page = session.page
+        event_type = event.get("type")
+        
+        if event_type == "click":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            button = event.get("button", "left")
+            await page.mouse.click(x, y, button=button)
+        
+        elif event_type == "dblclick":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            await page.mouse.dblclick(x, y)
+        
+        elif event_type == "mousemove":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            await page.mouse.move(x, y)
+        
+        elif event_type == "mousedown":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            button = event.get("button", "left")
+            await page.mouse.move(x, y)
+            await page.mouse.down(button=button)
+        
+        elif event_type == "mouseup":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            button = event.get("button", "left")
+            await page.mouse.move(x, y)
+            await page.mouse.up(button=button)
+        
+        elif event_type == "scroll":
+            x = event.get("x", 0)
+            y = event.get("y", 0)
+            delta_x = event.get("deltaX", 0)
+            delta_y = event.get("deltaY", 0)
+            await page.mouse.move(x, y)
+            await page.mouse.wheel(delta_x, delta_y)
+        
+        elif event_type == "keydown":
+            key = event.get("key", "")
+            await handle_key_event(page, key, "down")
+        
+        elif event_type == "keyup":
+            key = event.get("key", "")
+            await handle_key_event(page, key, "up")
+        
+        elif event_type == "keypress":
+            key = event.get("key", "")
+            if len(key) == 1:
+                await page.keyboard.type(key)
+        
+        elif event_type == "input":
+            # Direct text input for mobile keyboards
+            text = event.get("text", "")
+            if text:
+                await page.keyboard.type(text)
+        
+        elif event_type == "touch":
+            touches = event.get("touches", [])
+            action = event.get("action", "tap")
+            
+            if action == "tap" and touches:
+                x = touches[0].get("x", 0)
+                y = touches[0].get("y", 0)
+                await page.mouse.click(x, y)
+            
+            elif action == "move" and touches:
+                x = touches[0].get("x", 0)
+                y = touches[0].get("y", 0)
+                await page.mouse.move(x, y)
+        
+        elif event_type == "resize":
+            width = event.get("width", 1280)
+            height = event.get("height", 720)
+            session.viewport_width = width
+            session.viewport_height = height
+            await page.set_viewport_size({"width": width, "height": height})
+        
+        elif event_type == "navigate":
+            url = event.get("url", "")
+            if url:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        
+        elif event_type == "back":
+            await page.go_back()
+        
+        elif event_type == "forward":
+            await page.go_forward()
+        
+        elif event_type == "refresh":
+            await page.reload()
+    
+    except Exception as e:
+        logger.error(f"Error handling event {event.get('type')}: {e}")
+
+async def handle_key_event(page: Page, key: str, action: str):
+    """Handle keyboard events with proper key mapping"""
+    # Map special keys
+    key_map = {
+        "Backspace": "Backspace",
+        "Tab": "Tab",
+        "Enter": "Enter",
+        "Shift": "Shift",
+        "Control": "Control",
+        "Alt": "Alt",
+        "Escape": "Escape",
+        "Space": " ",
+        " ": " ",
+        "ArrowUp": "ArrowUp",
+        "ArrowDown": "ArrowDown",
+        "ArrowLeft": "ArrowLeft",
+        "ArrowRight": "ArrowRight",
+        "Delete": "Delete",
+        "Home": "Home",
+        "End": "End",
+        "PageUp": "PageUp",
+        "PageDown": "PageDown",
+        "F1": "F1", "F2": "F2", "F3": "F3", "F4": "F4",
+        "F5": "F5", "F6": "F6", "F7": "F7", "F8": "F8",
+        "F9": "F9", "F10": "F10", "F11": "F11", "F12": "F12",
+    }
+    
+    mapped_key = key_map.get(key, key)
+    
+    try:
+        if action == "down":
+            await page.keyboard.down(mapped_key)
+        elif action == "up":
+            await page.keyboard.up(mapped_key)
+    except Exception as e:
+        logger.debug(f"Key event error for {key}: {e}")
 
 # Include the router in the main app
 app.include_router(api_router)
@@ -76,14 +399,3 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
