@@ -177,7 +177,7 @@ class MagoTraderAPITester:
             return self.log_test("WebSocket Connection", False, "No session ID available")
         
         try:
-            ws_url = f"{self.ws_url}/ws/{self.session_id}"
+            ws_url = f"{self.ws_url}/api/ws/{self.session_id}"
             print(f"🔗 Connecting to WebSocket: {ws_url}")
             
             # Reset counters
